@@ -1,7 +1,9 @@
 #include "mods/hook.hpp"
 #include "mods/service.hpp"
+#include "mods/svc/config.h"
 #include "mods/svc/hook.h"
 #include "mods/svc/log.h"
+#include "mods/svc/ui.h"
 
 #include "d/d_com_inf_game.h"
 #include "d/d_kankyo.h"
@@ -15,8 +17,22 @@ DEFINE_MOD();
 
 IMPORT_SERVICE(LogService, svc_log);
 IMPORT_SERVICE(HookService, svc_hook);
+IMPORT_SERVICE(ConfigService, svc_config);
+IMPORT_SERVICE(UiService, svc_ui);
 
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
+
+static ConfigVarHandle g_cvar_enabled = 0;
+
+static bool is_mod_enabled() {
+    bool enabled = true;
+    if (g_cvar_enabled != 0 &&
+        svc_config->get_bool(mod_ctx, g_cvar_enabled, &enabled) == MOD_OK)
+    {
+        return enabled;
+    }
+    return true;
+}
 
 static bool should_sync_time(dScnKy_env_light_c* env_light) {
     if (dKy_darkworld_check()) {
@@ -30,7 +46,7 @@ static bool should_sync_time(dScnKy_env_light_c* env_light) {
 
 static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dScnKy_env_light_c* env_light = mods::arg<dScnKy_env_light_c*>(args, 0);
-    if (env_light == nullptr || !should_sync_time(env_light)) {
+    if (env_light == nullptr || !is_mod_enabled() || !should_sync_time(env_light)) {
         return;
     }
 
@@ -90,9 +106,37 @@ static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dComIfGs_setTime(env_light->daytime);
 }
 
+static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_TOGGLE;
+    control.label = "Enabled";
+    control.binding = UI_BINDING_CONFIG_VAR;
+    control.config_var = g_cvar_enabled;
+    return svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
+}
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
-    ModResult result = mods::hook_add_post<SetDaytime>(svc_hook, on_set_daytime_post);
+    ConfigVarDesc enabled_desc = CONFIG_VAR_DESC_INIT;
+    enabled_desc.name = "modEnabled";
+    enabled_desc.type = CONFIG_VAR_BOOL;
+    enabled_desc.default_bool = true;
+
+    ModResult result = svc_config->register_var(mod_ctx, &enabled_desc, &g_cvar_enabled);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to register enabled cvar");
+        return result;
+    }
+
+    UiModsPanelDesc panel_desc = UI_MODS_PANEL_DESC_INIT;
+    panel_desc.build = build_panel;
+    result = svc_ui->register_mods_panel(mod_ctx, &panel_desc);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to register mod panel");
+        return result;
+    }
+
+    result = mods::hook_add_post<SetDaytime>(svc_hook, on_set_daytime_post);
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to install on_set_daytime_post");
         return result;
@@ -103,6 +147,9 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    if (is_mod_enabled()) {
+        dComIfGp_roomControl_setTimePass(0);
+    }
     return MOD_OK;
 }
 
