@@ -20,10 +20,24 @@ IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 
+// Hook dComIfGs_setTime by symbol name so we can globally gate all callers.
+DEFINE_HOOK_SYMBOL("dComIfGs_setTime", void(f32), SetTime);
+
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
+DEFINE_HOOK(&dKy_instant_timechg, InstantTimechg);
+
+// dKy_Create is a file-local static in d_kankyo.cpp; hook by symbol name.
+DEFINE_HOOK_SYMBOL("dKy_Create", int(void*), KankyoCreate);
 
 static ConfigVarHandle g_cvar_enabled = 0;
-static bool g_tsn_blockScriptedTimeWrites = false;
+
+// When true, dComIfGs_setTime calls are blocked unless they originate from
+// d_kankyo.cpp (tracked by g_tsn_kankyoActive > 0).
+static bool g_tsn_lockTime = false;
+
+// Incremented in pre-hooks for d_kankyo functions that legitimately call
+// dComIfGs_setTime; decremented at the end of their corresponding post-hooks.
+static int g_tsn_kankyoActive = 0;
 
 static bool is_mod_enabled() {
     bool enabled = true;
@@ -45,71 +59,108 @@ static bool should_sync_time(dScnKy_env_light_c* env_light) {
     return normal_time_progresses;
 }
 
+// Block dComIfGs_setTime from all non-kankyo callers when the lock is active.
+static HookAction on_set_time_pre(ModContext*, void*, void*, void*) {
+    if (g_tsn_lockTime && g_tsn_kankyoActive == 0) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+// Enter d_kankyo context before setDaytime so its dComIfGs_setTime call is allowed.
+static HookAction on_set_daytime_pre(ModContext*, void*, void*, void*) {
+    g_tsn_kankyoActive++;
+    return HOOK_CONTINUE;
+}
+
 static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
+    // g_tsn_kankyoActive is still >= 1; decrement at the very end so our own
+    // dComIfGs_setTime call below is also within the kankyo-allowed window.
     dScnKy_env_light_c* env_light = mods::arg<dScnKy_env_light_c*>(args, 0);
-    if (env_light == nullptr || !is_mod_enabled()) {
-        return;
-    }
-
-    dComIfGp_roomControl_setTimePass(0);
-    if (!should_sync_time(env_light)) {
-        return;
-    }
-
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::tm local_time {};
+    if (env_light != nullptr && is_mod_enabled()) {
+        dComIfGp_roomControl_setTimePass(0);
+        if (should_sync_time(env_light)) {
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+            std::tm local_time {};
 #if defined(_WIN32)
-    localtime_s(&local_time, &now_time);
+            localtime_s(&local_time, &now_time);
 #else
-    localtime_r(&now_time, &local_time);
+            localtime_r(&now_time, &local_time);
 #endif
 
-    const f32 calendar_daytime = local_time.tm_hour * 15.0f +
-                                 local_time.tm_min * (15.0f / 60.0f) +
-                                 local_time.tm_sec * (15.0f / 3600.0f);
+            const f32 calendar_daytime = local_time.tm_hour * 15.0f +
+                                         local_time.tm_min * (15.0f / 60.0f) +
+                                         local_time.tm_sec * (15.0f / 3600.0f);
 
-    f32 diff_daytime = calendar_daytime - env_light->daytime;
-    if (diff_daytime < 0.0f) {
-        diff_daytime += 360.0f;
-    }
+            f32 diff_daytime = calendar_daytime - env_light->daytime;
+            if (diff_daytime < 0.0f) {
+                diff_daytime += 360.0f;
+            }
 
-    // True when game time slightly overshot device time (game is ahead by less than 2 degrees
-    // in the absolute sense, ruling out the midnight-crossing case where the raw difference
-    // would be negative and large).
-    const bool game_slightly_ahead = env_light->daytime > calendar_daytime &&
-                                     env_light->daytime - calendar_daytime < 2.0f;
+            // True when game time slightly overshot device time (game is ahead by less than
+            // 2 degrees in the absolute sense, ruling out the midnight-crossing case where
+            // the raw difference would be negative and large).
+            const bool game_slightly_ahead = env_light->daytime > calendar_daytime &&
+                                             env_light->daytime - calendar_daytime < 2.0f;
 
-    // True when the game just crossed midnight but the device hasn't yet: game is within
-    // 2 degrees past midnight while the device is within 2 degrees before midnight.
-    // Without this check the hook would advance game time through a full 360-degree cycle
-    // chasing the large numeric gap, causing a visible full-day spin before stopping.
-    const bool game_just_past_midnight = env_light->daytime < 2.0f && calendar_daytime > 358.0f;
+            // True when the game just crossed midnight but the device hasn't yet: game is
+            // within 2 degrees past midnight while the device is within 2 degrees before
+            // midnight. Without this check the hook would advance game time through a full
+            // 360-degree cycle chasing the large numeric gap, causing a visible full-day
+            // spin before stopping.
+            const bool game_just_past_midnight =
+                env_light->daytime < 2.0f && calendar_daytime > 358.0f;
 
-    if (game_slightly_ahead || game_just_past_midnight ||
-        (diff_daytime <= 1.0f && env_light->daytime <= calendar_daytime)) {
-        // Game is at or just past the target; snap to device time.
-        // If the game crossed midnight before the device did, revert that crossing so mDate
-        // stays consistent with the pre-midnight position. The natural game tick will re-cross
-        // midnight (and re-increment mDate) once the device also passes midnight.
-        if (game_just_past_midnight) {
-            env_light->mDate--;
-            dComIfGs_setDate(env_light->mDate);
+            if (game_slightly_ahead || game_just_past_midnight ||
+                (diff_daytime <= 1.0f && env_light->daytime <= calendar_daytime)) {
+                // Game is at or just past the target; snap to device time.
+                // If the game crossed midnight before the device did, revert that crossing
+                // so mDate stays consistent with the pre-midnight position.  The natural
+                // game tick will re-cross midnight (and re-increment mDate) once the device
+                // also passes midnight.
+                if (game_just_past_midnight) {
+                    env_light->mDate--;
+                    dComIfGs_setDate(env_light->mDate);
+                }
+                env_light->daytime = calendar_daytime;
+            } else {
+                // Game is behind the target; advance by one step and wrap to [0, 360).
+                env_light->daytime += 1.0f;
+                if (env_light->daytime >= 360.0f) {
+                    env_light->daytime -= 360.0f;
+                    // Crossed midnight during catch-up; keep mDate and the day-flag in sync.
+                    env_light->mDate++;
+                    dComIfGs_setDate(env_light->mDate);
+                    dKankyo_DayProc();
+                }
+            }
+
+            dComIfGs_setTime(env_light->daytime);
         }
-        env_light->daytime = calendar_daytime;
-    } else {
-        // Game is behind the target; advance by one step and wrap to [0, 360).
-        env_light->daytime += 1.0f;
-        if (env_light->daytime >= 360.0f) {
-            env_light->daytime -= 360.0f;
-            // Crossed midnight during catch-up; keep mDate and the day-flag in sync.
-            env_light->mDate++;
-            dComIfGs_setDate(env_light->mDate);
-            dKankyo_DayProc();
-        }
     }
+    g_tsn_kankyoActive--;
+}
 
-    dComIfGs_setTime(env_light->daytime);
+// dKy_instant_timechg and dKy_Create are d_kankyo.cpp functions whose
+// dComIfGs_setTime calls must be allowed through the lock.
+
+static HookAction on_instant_timechg_pre(ModContext*, void*, void*, void*) {
+    g_tsn_kankyoActive++;
+    return HOOK_CONTINUE;
+}
+
+static void on_instant_timechg_post(ModContext*, void*, void*, void*) {
+    g_tsn_kankyoActive--;
+}
+
+static HookAction on_kankyo_create_pre(ModContext*, void*, void*, void*) {
+    g_tsn_kankyoActive++;
+    return HOOK_CONTINUE;
+}
+
+static void on_kankyo_create_post(ModContext*, void*, void*, void*) {
+    g_tsn_kankyoActive--;
 }
 
 static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
@@ -142,25 +193,61 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         return result;
     }
 
+    result = mods::hook_add_pre<SetTime>(svc_hook, on_set_time_pre);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_set_time_pre");
+        return result;
+    }
+
+    result = mods::hook_add_pre<SetDaytime>(svc_hook, on_set_daytime_pre);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_set_daytime_pre");
+        return result;
+    }
+
     result = mods::hook_add_post<SetDaytime>(svc_hook, on_set_daytime_post);
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to install on_set_daytime_post");
         return result;
     }
 
-    g_tsn_blockScriptedTimeWrites = is_mod_enabled();
+    result = mods::hook_add_pre<InstantTimechg>(svc_hook, on_instant_timechg_pre);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_instant_timechg_pre");
+        return result;
+    }
+
+    result = mods::hook_add_post<InstantTimechg>(svc_hook, on_instant_timechg_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_instant_timechg_post");
+        return result;
+    }
+
+    result = mods::hook_add_pre<KankyoCreate>(svc_hook, on_kankyo_create_pre);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_kankyo_create_pre");
+        return result;
+    }
+
+    result = mods::hook_add_post<KankyoCreate>(svc_hook, on_kankyo_create_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_kankyo_create_post");
+        return result;
+    }
+
+    g_tsn_lockTime = is_mod_enabled();
 
     svc_log->info(mod_ctx, "time_sync_neo initialized");
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    g_tsn_blockScriptedTimeWrites = is_mod_enabled();
+    g_tsn_lockTime = is_mod_enabled();
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
-    g_tsn_blockScriptedTimeWrites = false;
+    g_tsn_lockTime = false;
     svc_log->info(mod_ctx, "time_sync_neo shutdown");
     return MOD_OK;
 }
