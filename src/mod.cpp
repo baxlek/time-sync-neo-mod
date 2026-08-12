@@ -23,8 +23,11 @@ DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
 
 namespace {
 
+constexpr int kMaxTimePassRestoreRetries = 60;
+
 ConfigVarHandle g_cvarEnabled = 0;
 bool g_timePassOverridden = false;
+int g_timePassRestoreRetries = 0;
 
 bool is_mod_enabled() {
     bool enabled = true;
@@ -97,17 +100,18 @@ static void release_time_pass_override(bool allowForgetIfUnavailable) {
 
     if (restore_room_time_pass()) {
         g_timePassOverridden = false;
-    } else if (allowForgetIfUnavailable && dComIfGp_getStageRoom() == nullptr) {
+        g_timePassRestoreRetries = 0;
+    } else if (allowForgetIfUnavailable || ++g_timePassRestoreRetries >= kMaxTimePassRestoreRetries) {
         g_timePassOverridden = false;
+        g_timePassRestoreRetries = 0;
     }
 }
 
 static void update_time_pass_override() {
     if (is_mod_enabled()) {
-        if (!g_timePassOverridden || dComIfGp_roomControl_getTimePass()) {
-            dComIfGp_roomControl_setTimePass(false);
-        }
+        dComIfGp_roomControl_setTimePass(false);
         g_timePassOverridden = true;
+        g_timePassRestoreRetries = 0;
         return;
     }
 
