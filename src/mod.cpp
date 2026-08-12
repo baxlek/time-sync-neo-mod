@@ -6,6 +6,7 @@
 #include "mods/svc/ui.h"
 
 #include "d/actor/d_a_demo00.h"
+#include "d/actor/d_a_kytag11.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_kankyo.h"
 #include "d/d_kankyo_static.h"
@@ -26,6 +27,8 @@ DEFINE_HOOK(&daDemo00_c::actPerformance, ActPerformance);
 DEFINE_HOOK(&dKy_instant_timechg, InstantTimechg);
 // dKy_Create is a file-local static in d_kankyo.cpp; hook by symbol name.
 DEFINE_HOOK_SYMBOL("dKy_Create", int(void*), KankyoCreate);
+// daKytag11_Execute is a file-local static in d_a_kytag11.cpp; hook by symbol name.
+DEFINE_HOOK_SYMBOL("daKytag11_Execute", int(fopAc_ac_c*), Kytag11Execute);
 
 static ConfigVarHandle g_cvar_enabled = 0;
 
@@ -172,6 +175,50 @@ static void on_kankyo_create_post(ModContext*, void*, void*, void*) {
     dComIfGs_setTime(wall_time);
 }
 
+// Saved state for the Kytag11Execute instance currently being suppressed.
+// Hook PRE/POST pairs fire sequentially (non-reentrant), so a single slot is sufficient.
+static kytag11_class* g_kytag11_suppressed = nullptr;
+// Fields saved to prevent the initial forced time-set and per-frame time advancement.
+static u8 g_saved_kytag11_mNewTime = 0;
+static u8 g_saved_kytag11_mEnvTime = 0;
+// mInitTimeChange is restored so that disabling the mod allows the initial set to re-run cleanly.
+static u8 g_saved_kytag11_mInitTimeChange = 0;
+
+// PRE hook: when the mod is enabled, suppress daKytag11_Execute's time-overrides by
+// replacing the two fields that drive them for the duration of the call.
+//
+// mNewTime: the function skips the initial time-set when mNewTime == 0x1F (sentinel).
+// mEnvTime: controls the per-frame advancement delta; zero makes it a no-op.
+// mInitTimeChange is also saved and restored so the suppress does not permanently mark
+// the initial-set as done (which would prevent it from running if the mod is later disabled).
+static HookAction on_kytag11_execute_pre(ModContext*, void* args, void*, void*) {
+    g_kytag11_suppressed = nullptr;
+    if (!is_mod_enabled()) {
+        return HOOK_CONTINUE;
+    }
+    kytag11_class* self = mods::arg<kytag11_class*>(args, 0);
+    if (self == nullptr) {
+        return HOOK_CONTINUE;
+    }
+    g_kytag11_suppressed = self;
+    g_saved_kytag11_mNewTime = self->mNewTime;
+    g_saved_kytag11_mEnvTime = self->mEnvTime;
+    g_saved_kytag11_mInitTimeChange = self->mInitTimeChange;
+    self->mNewTime = 0x1F;  // sentinel: skip the initial forced time-set
+    self->mEnvTime = 0;     // zero advancement: per-frame delta becomes 0
+    return HOOK_CONTINUE;
+}
+
+// POST hook: restore the fields modified by on_kytag11_execute_pre.
+static void on_kytag11_execute_post(ModContext*, void*, void*, void*) {
+    if (g_kytag11_suppressed != nullptr) {
+        g_kytag11_suppressed->mNewTime = g_saved_kytag11_mNewTime;
+        g_kytag11_suppressed->mEnvTime = g_saved_kytag11_mEnvTime;
+        g_kytag11_suppressed->mInitTimeChange = g_saved_kytag11_mInitTimeChange;
+        g_kytag11_suppressed = nullptr;
+    }
+}
+
 static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_TOGGLE;
@@ -231,6 +278,20 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     result = mods::hook_add_post<KankyoCreate>(svc_hook, on_kankyo_create_post);
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to install on_kankyo_create_post");
+        return result;
+    }
+
+    // Install the POST hook before the PRE hook: if POST fails, PRE is never
+    // registered, so mNewTime/mEnvTime can never be zeroed without being restored.
+    result = mods::hook_add_post<Kytag11Execute>(svc_hook, on_kytag11_execute_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_kytag11_execute_post");
+        return result;
+    }
+
+    result = mods::hook_add_pre<Kytag11Execute>(svc_hook, on_kytag11_execute_pre);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_kytag11_execute_pre");
         return result;
     }
 
