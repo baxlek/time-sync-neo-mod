@@ -23,6 +23,7 @@ IMPORT_SERVICE(UiService, svc_ui);
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
 
 static ConfigVarHandle g_cvar_enabled = 0;
+static bool g_tsn_blockScriptedTimeWrites = false;
 
 static bool is_mod_enabled() {
     bool enabled = true;
