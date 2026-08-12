@@ -90,24 +90,28 @@ static bool restore_room_time_pass() {
     return true;
 }
 
-static void release_time_pass_override() {
+static void release_time_pass_override(bool allowForgetIfUnavailable) {
     if (!g_timePassOverridden) {
         return;
     }
 
-    if (restore_room_time_pass() || dComIfGp_getStageRoom() == nullptr) {
+    if (restore_room_time_pass()) {
+        g_timePassOverridden = false;
+    } else if (allowForgetIfUnavailable && dComIfGp_getStageRoom() == nullptr) {
         g_timePassOverridden = false;
     }
 }
 
 static void update_time_pass_override() {
     if (is_mod_enabled()) {
-        dComIfGp_roomControl_setTimePass(false);
+        if (!g_timePassOverridden || dComIfGp_roomControl_getTimePass()) {
+            dComIfGp_roomControl_setTimePass(false);
+        }
         g_timePassOverridden = true;
         return;
     }
 
-    release_time_pass_override();
+    release_time_pass_override(false);
 }
 
 static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
@@ -218,7 +222,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
-    release_time_pass_override();
+    release_time_pass_override(true);
     svc_log->info(mod_ctx, "time_sync_neo shutdown");
     return MOD_OK;
 }
