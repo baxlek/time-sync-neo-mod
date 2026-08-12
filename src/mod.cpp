@@ -137,20 +137,38 @@ static void on_wolf_howl_demo_init_post(ModContext*, void*, void*, void*) {
     g_blockedTimeSongThisHowl = false;
 }
 
+static bool has_completed_time_song(daAlink_c* link) {
+    if (link == nullptr || link->getCorrectCurveID() != kTimeSongCurveId ||
+        !dComIfGp_roomControl_getTimePass())
+    {
+        return false;
+    }
+
+    auto* event = dComIfGp_getEvent();
+    if (event == nullptr) {
+        return false;
+    }
+
+    const bool is_skip_edge = event->checkSkipEdge();
+    return (link->mProcVar3.field_0x300e == -1 || is_skip_edge) &&
+           (link->checkUnderMove0BckNoArcWolf(daAlink_c::WANM_HOWL_END) || is_skip_edge) &&
+           (link->checkAnmEnd(link->mUnderFrameCtrl) || is_skip_edge) &&
+           link->mProcVar0.mHowlExitID < 0;
+}
+
 static void on_wolf_howl_demo_post(ModContext*, void* args, void*, void*) {
     if (!is_mod_enabled() || g_blockedTimeSongThisHowl) {
         return;
     }
 
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    if (link == nullptr || link->getCorrectCurveID() != kTimeSongCurveId ||
-        g_env_light.time_change_rate <= 0.0f)
-    {
+    if (!has_completed_time_song(link)) {
         return;
     }
 
+    const bool is_skip_edge = dComIfGp_getEvent()->checkSkipEdge();
     g_env_light.time_change_rate = 0.0f;
-    link->setWolfHowlNotHappen(0);
+    link->setWolfHowlNotHappen(is_skip_edge);
     g_blockedTimeSongThisHowl = true;
 }
 
