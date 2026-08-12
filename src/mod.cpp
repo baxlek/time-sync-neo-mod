@@ -5,13 +5,11 @@
 #include "mods/svc/log.h"
 #include "mods/svc/ui.h"
 
-#include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_kankyo.h"
 #include "d/d_kankyo_static.h"
 
 #include <chrono>
-#include <cstring>
 #include <ctime>
 
 DEFINE_MOD();
@@ -22,15 +20,11 @@ IMPORT_SERVICE(LogService, svc_log);
 IMPORT_SERVICE(HookService, svc_hook);
 
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
-DEFINE_HOOK(&daAlink_c::procWolfHowlDemoInit, WolfHowlDemoInit);
-DEFINE_HOOK(&daAlink_c::procWolfHowlDemo, WolfHowlDemo);
 
 namespace {
 
-constexpr u8 kTimeSongCurveId = 9;
-
 ConfigVarHandle g_cvarEnabled = 0;
-bool g_blockedTimeSongThisHowl = false;
+bool g_timePassOverridden = false;
 
 bool is_mod_enabled() {
     bool enabled = true;
@@ -69,6 +63,43 @@ static bool should_sync_time(dScnKy_env_light_c* env_light) {
     const bool normal_time_progresses =
         !env_light->field_0x130a;
     return normal_time_progresses;
+}
+
+static bool try_get_current_room_time_pass(bool& outTimePass) {
+    roomRead_class* room = dComIfGp_getStageRoom();
+    if (room == nullptr || room->m_entries == nullptr) {
+        return false;
+    }
+
+    const int stay_no = dComIfGp_roomControl_getStayNo();
+    if (stay_no < 0 || room->num <= stay_no || room->m_entries[stay_no] == nullptr) {
+        return false;
+    }
+
+    outTimePass = dStage_roomRead_dt_c_GetTimePass(*room->m_entries[stay_no]) != 0;
+    return true;
+}
+
+static bool restore_room_time_pass() {
+    bool time_pass = false;
+    if (!try_get_current_room_time_pass(time_pass)) {
+        return false;
+    }
+
+    dComIfGp_roomControl_setTimePass(time_pass);
+    return true;
+}
+
+static void update_time_pass_override() {
+    if (is_mod_enabled()) {
+        dComIfGp_roomControl_setTimePass(false);
+        g_timePassOverridden = true;
+        return;
+    }
+
+    if (g_timePassOverridden && restore_room_time_pass()) {
+        g_timePassOverridden = false;
+    }
 }
 
 static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
@@ -133,56 +164,6 @@ static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dComIfGs_setTime(env_light->daytime);
 }
 
-static void on_wolf_howl_demo_init_post(ModContext*, void*, void*, void*) {
-    g_blockedTimeSongThisHowl = false;
-}
-
-static bool has_completed_time_song(daAlink_c* link, bool& outIsSkipEdge) {
-    outIsSkipEdge = false;
-    if (link == nullptr || link->getCorrectCurveID() != kTimeSongCurveId ||
-        !dComIfGp_roomControl_getTimePass())
-    {
-        return false;
-    }
-
-    auto* event = dComIfGp_getEvent();
-    if (event == nullptr) {
-        return false;
-    }
-
-    outIsSkipEdge = event->checkSkipEdge();
-    if (link->mProcVar3.field_0x300e != -1 && !outIsSkipEdge) {
-        return false;
-    }
-
-    if (!link->checkUnderMove0BckNoArcWolf(daAlink_c::WANM_HOWL_END) && !outIsSkipEdge) {
-        return false;
-    }
-
-    if (!link->checkAnmEnd(link->mUnderFrameCtrl) && !outIsSkipEdge) {
-        return false;
-    }
-
-    // Scene-changing howls should keep their original exit behavior even when skipped.
-    return link->mProcVar0.mHowlExitID < 0;
-}
-
-static void on_wolf_howl_demo_post(ModContext*, void* args, void*, void*) {
-    if (!is_mod_enabled() || g_blockedTimeSongThisHowl) {
-        return;
-    }
-
-    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    bool is_skip_edge = false;
-    if (!has_completed_time_song(link, is_skip_edge)) {
-        return;
-    }
-
-    g_env_light.time_change_rate = 0.0f;
-    link->setWolfHowlNotHappen(is_skip_edge);
-    g_blockedTimeSongThisHowl = true;
-}
-
 ModResult register_bool_option(
     const char* name, bool defaultValue, ConfigVarHandle& outHandle, const char* errorMessage) {
     ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
@@ -219,27 +200,19 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         return result;
     }
 
-    result = mods::hook_add_post<WolfHowlDemoInit>(svc_hook, on_wolf_howl_demo_init_post);
-    if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "failed to install on_wolf_howl_demo_init_post");
-        return result;
-    }
-
-    result = mods::hook_add_post<WolfHowlDemo>(svc_hook, on_wolf_howl_demo_post);
-    if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "failed to install on_wolf_howl_demo_post");
-        return result;
-    }
-
     svc_log->info(mod_ctx, "time_sync_neo initialized");
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    update_time_pass_override();
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
+    if (g_timePassOverridden && restore_room_time_pass()) {
+        g_timePassOverridden = false;
+    }
     svc_log->info(mod_ctx, "time_sync_neo shutdown");
     return MOD_OK;
 }
