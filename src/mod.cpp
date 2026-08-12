@@ -151,10 +151,20 @@ static bool has_completed_time_song(daAlink_c* link, bool& outIsSkipEdge) {
     }
 
     outIsSkipEdge = event->checkSkipEdge();
-    return (link->mProcVar3.field_0x300e == -1 || outIsSkipEdge) &&
-           (link->checkUnderMove0BckNoArcWolf(daAlink_c::WANM_HOWL_END) || outIsSkipEdge) &&
-           (link->checkAnmEnd(link->mUnderFrameCtrl) || outIsSkipEdge) &&
-           link->mProcVar0.mHowlExitID < 0;
+    if (link->mProcVar3.field_0x300e != -1 && !outIsSkipEdge) {
+        return false;
+    }
+
+    if (!link->checkUnderMove0BckNoArcWolf(daAlink_c::WANM_HOWL_END) && !outIsSkipEdge) {
+        return false;
+    }
+
+    if (!link->checkAnmEnd(link->mUnderFrameCtrl) && !outIsSkipEdge) {
+        return false;
+    }
+
+    // Scene-changing howls should keep their original exit behavior even when skipped.
+    return link->mProcVar0.mHowlExitID < 0;
 }
 
 static void on_wolf_howl_demo_post(ModContext*, void* args, void*, void*) {
