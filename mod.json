@@ -1,7 +1,7 @@
 {
   "id": "dev.baxlek.time_sync_neo",
   "name": "Time Sync Neo",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "baxlek",
-  "description": "Synchronizes in-game time with the device clock while the mod is enabled. Based off of System Time Sync by ZipoLabs."
+  "description": "Synchronizes in-game time with the device clock. Based off of System Time Sync by ZipoLabs."
 }
