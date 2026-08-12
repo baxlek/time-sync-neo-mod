@@ -23,6 +23,9 @@ IMPORT_SERVICE(UiService, svc_ui);
 
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
 DEFINE_HOOK(&daDemo00_c::actPerformance, ActPerformance);
+DEFINE_HOOK(&dKy_instant_timechg, InstantTimechg);
+// dKy_Create is a file-local static in d_kankyo.cpp; hook by symbol name.
+DEFINE_HOOK_SYMBOL("dKy_Create", int(void*), KankyoCreate);
 
 static ConfigVarHandle g_cvar_enabled = 0;
 
@@ -46,6 +49,20 @@ static bool should_sync_time(dScnKy_env_light_c* env_light) {
     return normal_time_progresses;
 }
 
+static f32 compute_wall_clock_daytime() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time {};
+#if defined(_WIN32)
+    localtime_s(&local_time, &now_time);
+#else
+    localtime_r(&now_time, &local_time);
+#endif
+    return local_time.tm_hour * 15.0f +
+           local_time.tm_min * (15.0f / 60.0f) +
+           local_time.tm_sec * (15.0f / 3600.0f);
+}
+
 static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dScnKy_env_light_c* env_light = mods::arg<dScnKy_env_light_c*>(args, 0);
     if (env_light == nullptr || !is_mod_enabled()) {
@@ -57,18 +74,7 @@ static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
         return;
     }
 
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    std::tm local_time {};
-#if defined(_WIN32)
-    localtime_s(&local_time, &now_time);
-#else
-    localtime_r(&now_time, &local_time);
-#endif
-
-    const f32 calendar_daytime = local_time.tm_hour * 15.0f +
-                                 local_time.tm_min * (15.0f / 60.0f) +
-                                 local_time.tm_sec * (15.0f / 3600.0f);
+    const f32 calendar_daytime = compute_wall_clock_daytime();
 
     f32 diff_daytime = calendar_daytime - env_light->daytime;
     if (diff_daytime < 0.0f) {
@@ -116,6 +122,7 @@ static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
 // Saved state for the actPerformance instance currently being suppressed.
 // Hook PRE/POST pairs fire sequentially (non-reentrant), so a single slot is sufficient.
 static daDemo00_c* g_demo00_suppressed_self = nullptr;
+// field_0x6b8: controls the branch in actPerformance that calls dComIfGs_setTime(pos.x * 15.0f).
 static u8 g_saved_demo00_field_0x6b8 = 0;
 
 // PRE hook: when the mod is enabled, zero field_0x6b8 so the branch that calls
@@ -141,6 +148,28 @@ static void on_act_performance_post(ModContext*, void*, void*, void*) {
         g_demo00_suppressed_self->field_0x6b8 = g_saved_demo00_field_0x6b8;
         g_demo00_suppressed_self = nullptr;
     }
+}
+
+// PRE hook: when the mod is enabled, skip dKy_instant_timechg entirely so that
+// scripted instant-time jumps (Sun's Song, event triggers, etc.) cannot override
+// the wall-clock time the mod is tracking.
+static HookAction on_instant_timechg_pre(ModContext*, void*, void*, void*) {
+    if (is_mod_enabled()) {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+// POST hook: after dKy_Create runs for a new stage, it may have forced the
+// in-game time to a stage-header value (or restored an old_time from before
+// dark world). Re-apply the wall-clock time so the mod stays in sync.
+static void on_kankyo_create_post(ModContext*, void*, void*, void*) {
+    if (!is_mod_enabled() || dKy_darkworld_check()) {
+        return;
+    }
+    const f32 wall_time = compute_wall_clock_daytime();
+    g_env_light.daytime = wall_time;
+    dComIfGs_setTime(wall_time);
 }
 
 static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
@@ -179,15 +208,29 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         return result;
     }
 
+    // Install the POST hook before the PRE hook: if POST fails, PRE is never
+    // registered, so field_0x6b8 can never be zeroed without being restored.
+    result = mods::hook_add_post<ActPerformance>(svc_hook, on_act_performance_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_act_performance_post");
+        return result;
+    }
+
     result = mods::hook_add_pre<ActPerformance>(svc_hook, on_act_performance_pre);
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to install on_act_performance_pre");
         return result;
     }
 
-    result = mods::hook_add_post<ActPerformance>(svc_hook, on_act_performance_post);
+    result = mods::hook_add_pre<InstantTimechg>(svc_hook, on_instant_timechg_pre);
     if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "failed to install on_act_performance_post");
+        svc_log->error(mod_ctx, "failed to install on_instant_timechg_pre");
+        return result;
+    }
+
+    result = mods::hook_add_post<KankyoCreate>(svc_hook, on_kankyo_create_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_kankyo_create_post");
         return result;
     }
 
