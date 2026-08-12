@@ -18,7 +18,7 @@ Existing Features:
 
 New Features:
 
-> Time is now retrieved using <chrono>. (Referenced directly from the device clock)
+> Time is now retrieved using chrono. (Referenced directly from the device clock)
 
 > Changing the device clock while Dusklight is running now sets the in-game time.
 
