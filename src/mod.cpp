@@ -1,8 +1,11 @@
 #include "mods/hook.hpp"
 #include "mods/service.hpp"
+#include "mods/svc/config.h"
 #include "mods/svc/hook.h"
 #include "mods/svc/log.h"
+#include "mods/svc/ui.h"
 
+#include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_kankyo.h"
 #include "d/d_kankyo_static.h"
@@ -13,12 +16,52 @@
 
 DEFINE_MOD();
 
+IMPORT_SERVICE(ConfigService, svc_config);
+IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_SERVICE(LogService, svc_log);
 IMPORT_SERVICE(HookService, svc_hook);
 
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
+DEFINE_HOOK(&daAlink_c::procWolfHowlDemoInit, WolfHowlDemoInit);
+DEFINE_HOOK(&daAlink_c::procWolfHowlDemo, WolfHowlDemo);
+
+namespace {
+
+constexpr u8 kTimeSongCurveId = 9;
+
+ConfigVarHandle g_cvarEnabled = 0;
+bool g_blockedTimeSongThisHowl = false;
+
+bool is_mod_enabled() {
+    bool enabled = true;
+    if (g_cvarEnabled == 0 || svc_config->get_bool(mod_ctx, g_cvarEnabled, &enabled) != MOD_OK) {
+        return true;
+    }
+    return enabled;
+}
+
+void add_control(UiElementHandle pane, const UiControlDesc& desc) {
+    svc_ui->pane_add_control(mod_ctx, pane, &desc, nullptr);
+}
+
+ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_TOGGLE;
+    control.label = "Enabled";
+    control.help_rml =
+        "Synchronize in-game time with your device clock. While enabled, Sun's Song shows "
+        "\"Nothing happened...\" instead of changing the time of day.";
+    control.binding = UI_BINDING_CONFIG_VAR;
+    control.config_var = g_cvarEnabled;
+    add_control(panel, control);
+    return MOD_OK;
+}
 
 static bool should_sync_time(dScnKy_env_light_c* env_light) {
+    if (!is_mod_enabled()) {
+        return false;
+    }
+
     if (dKy_darkworld_check()) {
         return false;
     }
@@ -90,11 +133,72 @@ static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dComIfGs_setTime(env_light->daytime);
 }
 
+static void on_wolf_howl_demo_init_post(ModContext*, void*, void*, void*) {
+    g_blockedTimeSongThisHowl = false;
+}
+
+static void on_wolf_howl_demo_post(ModContext*, void* args, void*, void*) {
+    if (!is_mod_enabled() || g_blockedTimeSongThisHowl) {
+        return;
+    }
+
+    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
+    if (link == nullptr || link->getCorrectCurveID() != kTimeSongCurveId ||
+        g_env_light.time_change_rate <= 0.0f)
+    {
+        return;
+    }
+
+    g_env_light.time_change_rate = 0.0f;
+    link->setWolfHowlNotHappen(0);
+    g_blockedTimeSongThisHowl = true;
+}
+
+ModResult register_bool_option(
+    const char* name, bool defaultValue, ConfigVarHandle& outHandle, const char* errorMessage) {
+    ConfigVarDesc cvarDesc = CONFIG_VAR_DESC_INIT;
+    cvarDesc.name = name;
+    cvarDesc.type = CONFIG_VAR_BOOL;
+    cvarDesc.default_bool = defaultValue;
+    const ModResult result = svc_config->register_var(mod_ctx, &cvarDesc, &outHandle);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, errorMessage);
+    }
+    return result;
+}
+}  // namespace
+
 extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
-    ModResult result = mods::hook_add_post<SetDaytime>(svc_hook, on_set_daytime_post);
+    ModResult result = register_bool_option(
+        "active", true, g_cvarEnabled, "failed to register time_sync_neo active option");
+    if (result != MOD_OK) {
+        return result;
+    }
+
+    UiModsPanelDesc panelDesc = UI_MODS_PANEL_DESC_INIT;
+    panelDesc.build = build_panel;
+    result = svc_ui->register_mods_panel(mod_ctx, &panelDesc);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to register time_sync_neo mod panel");
+        return result;
+    }
+
+    result = mods::hook_add_post<SetDaytime>(svc_hook, on_set_daytime_post);
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to install on_set_daytime_post");
+        return result;
+    }
+
+    result = mods::hook_add_post<WolfHowlDemoInit>(svc_hook, on_wolf_howl_demo_init_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_wolf_howl_demo_init_post");
+        return result;
+    }
+
+    result = mods::hook_add_post<WolfHowlDemo>(svc_hook, on_wolf_howl_demo_post);
+    if (result != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to install on_wolf_howl_demo_post");
         return result;
     }
 
