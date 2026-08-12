@@ -46,7 +46,12 @@ static bool should_sync_time(dScnKy_env_light_c* env_light) {
 
 static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dScnKy_env_light_c* env_light = mods::arg<dScnKy_env_light_c*>(args, 0);
-    if (env_light == nullptr || !is_mod_enabled() || !should_sync_time(env_light)) {
+    if (env_light == nullptr || !is_mod_enabled()) {
+        return;
+    }
+
+    dComIfGp_roomControl_setTimePass(0);
+    if (!should_sync_time(env_light)) {
         return;
     }
 
@@ -147,9 +152,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
-    if (is_mod_enabled()) {
-        dComIfGp_roomControl_setTimePass(0);
-    }
     return MOD_OK;
 }
 
