@@ -5,7 +5,6 @@
 #include "mods/svc/log.h"
 #include "mods/svc/ui.h"
 
-#include "d/actor/d_a_demo00.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_kankyo.h"
 #include "d/d_kankyo_static.h"
@@ -22,7 +21,6 @@ IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 
 DEFINE_HOOK(&dScnKy_env_light_c::setDaytime, SetDaytime);
-DEFINE_HOOK(&daDemo00_c::actPerformance, ActPerformance);
 
 static ConfigVarHandle g_cvar_enabled = 0;
 
@@ -113,36 +111,6 @@ static void on_set_daytime_post(ModContext*, void* args, void*, void*) {
     dComIfGs_setTime(env_light->daytime);
 }
 
-static bool g_demo00_time_suppressed = false;
-static daDemo00_c* g_demo00_suppressed_self = nullptr;
-static u8 g_saved_demo00_field_0x6b8 = 0;
-
-static HookAction on_act_performance_pre(ModContext*, void* args, void*, void*) {
-    g_demo00_time_suppressed = false;
-    if (!is_mod_enabled()) {
-        return HOOK_CONTINUE;
-    }
-    daDemo00_c* self = mods::arg<daDemo00_c*>(args, 0);
-    g_demo00_suppressed_self = self;
-    g_saved_demo00_field_0x6b8 = self->field_0x6b8;
-    self->field_0x6b8 = 0;
-    g_demo00_time_suppressed = true;
-    return HOOK_CONTINUE;
-}
-
-static void on_act_performance_post(ModContext*, void* args, void*, void*) {
-    if (!g_demo00_time_suppressed) {
-        return;
-    }
-    daDemo00_c* self = mods::arg<daDemo00_c*>(args, 0);
-    if (self != g_demo00_suppressed_self) {
-        return;
-    }
-    self->field_0x6b8 = g_saved_demo00_field_0x6b8;
-    g_demo00_time_suppressed = false;
-    g_demo00_suppressed_self = nullptr;
-}
-
 static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_TOGGLE;
@@ -179,27 +147,19 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         return result;
     }
 
-    result = mods::hook_add_pre<ActPerformance>(svc_hook, on_act_performance_pre);
-    if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "failed to install on_act_performance_pre");
-        return result;
-    }
-
-    result = mods::hook_add_post<ActPerformance>(svc_hook, on_act_performance_post);
-    if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "failed to install on_act_performance_post");
-        return result;
-    }
+    g_tsn_blockScriptedTimeWrites = is_mod_enabled();
 
     svc_log->info(mod_ctx, "time_sync_neo initialized");
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    g_tsn_blockScriptedTimeWrites = is_mod_enabled();
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
+    g_tsn_blockScriptedTimeWrites = false;
     svc_log->info(mod_ctx, "time_sync_neo shutdown");
     return MOD_OK;
 }
