@@ -264,7 +264,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     ConfigVarDesc enabled_desc = CONFIG_VAR_DESC_INIT;
     enabled_desc.name = "modEnabled";
     enabled_desc.type = CONFIG_VAR_BOOL;
-    enabled_desc.default_bool = true;
+    enabled_desc.default_bool = false;
 
     ModResult result = svc_config->register_var(mod_ctx, &enabled_desc, &g_cvar_enabled);
     if (result != MOD_OK) {
