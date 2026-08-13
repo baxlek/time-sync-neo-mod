@@ -33,22 +33,11 @@ DEFINE_HOOK_SYMBOL("daKytag11_Execute", int(fopAc_ac_c*), Kytag11Execute);
 DEFINE_HOOK_SYMBOL("dusk::SpeedrunInfo::startRun", void(void*), SpeedrunInfoStartRun);
 
 static ConfigVarHandle g_cvar_enabled = 0;
-static ConfigVarHandle g_cvar_disable_speedrun = 0;
 
 static bool is_mod_enabled() {
     bool enabled = true;
     if (g_cvar_enabled != 0 &&
         svc_config->get_bool(mod_ctx, g_cvar_enabled, &enabled) == MOD_OK)
-    {
-        return enabled;
-    }
-    return true;
-}
-
-static bool is_disable_speedrun_enabled() {
-    bool enabled = true;
-    if (g_cvar_disable_speedrun != 0 &&
-        svc_config->get_bool(mod_ctx, g_cvar_disable_speedrun, &enabled) == MOD_OK)
     {
         return enabled;
     }
@@ -232,11 +221,11 @@ static void on_kytag11_execute_post(ModContext*, void*, void*, void*) {
     }
 }
 
-// PRE hook: when the mod is enabled and disableSpeedrunMode is on, skip
-// dusk::SpeedrunInfo::startRun so that starting a new game cannot activate the speedrun timer
-// while wall-clock time sync is in effect.
+// PRE hook: when the mod is enabled, skip dusk::SpeedrunInfo::startRun unconditionally so
+// that starting a new game cannot activate the speedrun timer while wall-clock time sync is
+// in effect. Syncing in-game time to the device clock is incompatible with speedrunning.
 static HookAction on_speedrun_start_pre(ModContext*, void*, void*, void*) {
-    if (is_mod_enabled() && is_disable_speedrun_enabled()) {
+    if (is_mod_enabled()) {
         return HOOK_SKIP_ORIGINAL;
     }
     return HOOK_CONTINUE;
@@ -248,17 +237,7 @@ static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError
     control.label = "Enabled";
     control.binding = UI_BINDING_CONFIG_VAR;
     control.config_var = g_cvar_enabled;
-    ModResult result = svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
-    if (result != MOD_OK) {
-        return result;
-    }
-
-    UiControlDesc disable_speedrun_control = UI_CONTROL_DESC_INIT;
-    disable_speedrun_control.kind = UI_CONTROL_TOGGLE;
-    disable_speedrun_control.label = "Disable Speedrun Mode";
-    disable_speedrun_control.binding = UI_BINDING_CONFIG_VAR;
-    disable_speedrun_control.config_var = g_cvar_disable_speedrun;
-    return svc_ui->pane_add_control(mod_ctx, panel, &disable_speedrun_control, nullptr);
+    return svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
 }
 
 extern "C" {
@@ -271,17 +250,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     ModResult result = svc_config->register_var(mod_ctx, &enabled_desc, &g_cvar_enabled);
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to register enabled cvar");
-        return result;
-    }
-
-    ConfigVarDesc disable_speedrun_desc = CONFIG_VAR_DESC_INIT;
-    disable_speedrun_desc.name = "disableSpeedrunMode";
-    disable_speedrun_desc.type = CONFIG_VAR_BOOL;
-    disable_speedrun_desc.default_bool = true;
-
-    result = svc_config->register_var(mod_ctx, &disable_speedrun_desc, &g_cvar_disable_speedrun);
-    if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "failed to register disableSpeedrunMode cvar");
         return result;
     }
 
@@ -341,9 +309,10 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
     result = mods::hook_add_pre<SpeedrunInfoStartRun>(svc_hook, on_speedrun_start_pre);
     if (result != MOD_OK) {
-        // Non-fatal: the symbol may be absent from older Dusklight manifests. Log a warning
-        // so the user can diagnose if the feature appears to have no effect.
-        svc_log->warn(mod_ctx, "failed to install on_speedrun_start_pre; disableSpeedrunMode will have no effect");
+        // Non-fatal: the symbol may be absent on Dusklight builds without a symbol manifest
+        // or on builds where the symbol name has changed. Log a warning so the user can tell
+        // why speedrun mode is not being suppressed on their build.
+        svc_log->warn(mod_ctx, "failed to install on_speedrun_start_pre; speedrun mode will not be force-disabled");
     }
 
     svc_log->info(mod_ctx, "time_sync_neo initialized");
