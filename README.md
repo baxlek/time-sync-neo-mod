@@ -24,4 +24,4 @@ New Features:
 
 > Time is now synchronized EVERYWHERE! Not just in areas where time flows normally.
 
-> Time stays synchronized even during dialogue and cutscenes.
+> Time stays synchronized even during dialogue, cutscenes and scene transitions.
