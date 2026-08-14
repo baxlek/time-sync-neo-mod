@@ -2,7 +2,7 @@
 
 A fully vibe-coded standalone mod for [Dusklight](https://github.com/TwilitRealm/dusklight).
 
-Synchronizes in-game time with real world time.
+Synchronizes in-game time with real-world time.
 
 A port of the "[Ship of Harkinian](https://github.com/HarbourMasters/Shipwright)" 'Time Sync' option.
 
@@ -20,7 +20,7 @@ New Features:
 
 > Time is now retrieved using chrono. (Referenced directly from the device clock)
 
-> Changing the device clock while Dusklight is running now sets the in-game time.
+> Changing the device clock while Dusklight is running now updates the in-game time.
 
 > Time is now synchronized EVERYWHERE! Not just in areas where time flows normally.
 
