@@ -13,7 +13,7 @@ include_guard(GLOBAL)
 
 set(DUSKLIGHT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dusklight"
         CACHE PATH "Path to the Dusklight source tree")
-set(DUSKLIGHT_REPOSITORY "https://github.com/TwilitRealm/dusklight.git"
+set(DUSKLIGHT_REPOSITORY "https://github.com/baxlek/dusklight.git"
         CACHE STRING "Dusklight git repository to fetch from")
 
 function(_exec_git)
