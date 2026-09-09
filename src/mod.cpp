@@ -29,10 +29,22 @@ DEFINE_HOOK(&dKy_instant_timechg, InstantTimechg);
 DEFINE_HOOK_SYMBOL("dKy_Create", int(void*), KankyoCreate);
 // daKytag11_Execute is a file-local static in d_a_kytag11.cpp; hook by symbol name.
 DEFINE_HOOK_SYMBOL("daKytag11_Execute", int(fopAc_ac_c*), Kytag11Execute);
+// dusk::resetForSpeedrunMode and dusk::restoreFromSpeedrunMode are free functions in
+// dusk/speedrun.cpp; hook by qualified name to track when speedrun mode is active.
+DEFINE_HOOK_SYMBOL("dusk::resetForSpeedrunMode", void(), ResetForSpeedrunMode);
+DEFINE_HOOK_SYMBOL("dusk::restoreFromSpeedrunMode", void(), RestoreFromSpeedrunMode);
 
 static ConfigVarHandle g_cvar_enabled = 0;
+// True while speedrun mode is active; set by the resetForSpeedrunMode hook and cleared
+// by the restoreFromSpeedrunMode hook.  Mirrors the semantics of addSpeedrunDisabledOption
+// in dusk/ui/settings.cpp: the mod is effectively off and its toggle is grayed out.
+// Initialized to false so that reloading the mod re-enables it even if speedrun mode is active.
+static bool g_speedrun_active = false;
 
 static bool is_mod_enabled() {
+    if (g_speedrun_active) {
+        return false;
+    }
     bool enabled = true;
     if (g_cvar_enabled != 0 &&
         svc_config->get_bool(mod_ctx, g_cvar_enabled, &enabled) == MOD_OK)
@@ -219,12 +231,31 @@ static void on_kytag11_execute_post(ModContext*, void*, void*, void*) {
     }
 }
 
+// POST hook: dusk::resetForSpeedrunMode has just forced all speedrun overrides; mark this
+// mod as suppressed so wall-clock sync does not interfere with the speedrun.
+static void on_reset_for_speedrun_post(ModContext*, void*, void*, void*) {
+    g_speedrun_active = true;
+}
+
+// POST hook: dusk::restoreFromSpeedrunMode has just cleared all overrides; re-enable the
+// mod so that wall-clock sync resumes once the user exits speedrun mode.
+static void on_restore_from_speedrun_post(ModContext*, void*, void*, void*) {
+    g_speedrun_active = false;
+}
+
+// Predicate polled each frame while the toggle is visible; mirrors the isDisabled lambda
+// used by addSpeedrunDisabledOption in dusk/ui/settings.cpp.
+static bool is_speedrun_active(ModContext*, void*) {
+    return g_speedrun_active;
+}
+
 static ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     UiControlDesc control = UI_CONTROL_DESC_INIT;
     control.kind = UI_CONTROL_TOGGLE;
     control.label = "Enabled";
     control.binding = UI_BINDING_CONFIG_VAR;
     control.config_var = g_cvar_enabled;
+    control.is_disabled = is_speedrun_active;
     return svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
 }
 
@@ -293,6 +324,18 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     if (result != MOD_OK) {
         svc_log->error(mod_ctx, "failed to install on_kytag11_execute_pre");
         return result;
+    }
+
+    result = mods::hook_add_post<ResetForSpeedrunMode>(svc_hook, on_reset_for_speedrun_post);
+    if (result != MOD_OK) {
+        // Non-fatal: the symbol may be absent on some Dusklight builds. Log a warning so
+        // the user knows why the toggle is not grayed out during speedrun mode.
+        svc_log->warn(mod_ctx, "failed to install on_reset_for_speedrun_post; toggle will not be disabled during speedrun mode");
+    }
+
+    result = mods::hook_add_post<RestoreFromSpeedrunMode>(svc_hook, on_restore_from_speedrun_post);
+    if (result != MOD_OK) {
+        svc_log->warn(mod_ctx, "failed to install on_restore_from_speedrun_post; mod may remain suppressed after exiting speedrun mode");
     }
 
     svc_log->info(mod_ctx, "time_sync_neo initialized");
